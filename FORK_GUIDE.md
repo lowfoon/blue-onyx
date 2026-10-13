@@ -1,6 +1,6 @@
 # Linux fork: build, test, and deploy
 
-This is the first development iteration of [lowfoon/blue-onyx](https://github.com/lowfoon/blue-onyx), based on upstream commit `1cd4d93`. See [the source analysis](REVERSE_ENGINEERING.md) for the architecture, confirmed bugs, remaining work, and validation limits.
+This is the first development iteration of [lowfoon/blue-onyx](https://github.com/lowfoon/blue-onyx), based on upstream commit `1cd4d93`. See [the source analysis](REVERSE_ENGINEERING.md) for the architecture, confirmed bugs, remaining work, and validation limits. [Intel-focused CI](https://github.com/lowfoon/blue-onyx/actions/runs/38373206951) passed all seven jobs, including CPU, CUDA and OpenVINO container builds/lifecycle checks. Actual GPU inference and NVR integration still require on-device testing.
 
 ## Intel OpenVINO
 

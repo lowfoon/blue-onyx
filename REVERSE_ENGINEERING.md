@@ -141,9 +141,10 @@ Deadlines do not interrupt an ONNX call already in progress. Dropping stale jobs
 - Compiled service smoke: default RF-DETR model downloaded, CPU inference returned bicycle/car/dog, readiness succeeded, SIGTERM exited with code 0.
 - ONNX Runtime used for the local smoke: official macOS arm64 1.29.0 binary.
 - [Initial fork CI run](https://github.com/lowfoon/blue-onyx/actions/runs/38371794404): Linux, Windows and macOS all-target tests/lints passed; Linux CUDA tests/lints passed; CPU Docker source build, liveness, readiness failure, and SIGTERM lifecycle smoke passed.
+- [Intel-focused validation run](https://github.com/lowfoon/blue-onyx/actions/runs/38373206951) at `89f41c2`: all seven jobs passed, including Linux/Windows/macOS tests and lints, CUDA tests/lints, and CPU/CUDA/Intel OpenVINO source-built containers with liveness/readiness-failure and SIGTERM lifecycle checks. Later commits update release metadata and documentation without changing the validated Rust source or container build instructions.
 - Container packaging retains the service MIT license and ONNX Runtime license/notices.
 
-The local host has no Docker CLI and no Linux GPU test environment attached to this checkout. Linux and Windows compilation/tests were validated by CI, and the initial CPU container lifecycle smoke passed there. Actual CUDA/OpenVINO execution, real camera concurrency, and Windows NVR integration remain unvalidated. CI now also builds the Intel OpenVINO and NVIDIA CUDA containers and checks their lifecycle without requiring a GPU; hardware acceptance is a separate gate.
+The local host has no Docker CLI and no Linux GPU test environment attached to this checkout. Linux and Windows compilation/tests were validated by CI, and the initial CPU container lifecycle smoke passed there. Actual CUDA/OpenVINO GPU inference, real camera concurrency, and Windows NVR integration remain unvalidated. CI now also builds the Intel OpenVINO and NVIDIA CUDA containers and checks their lifecycle without requiring a GPU; hardware acceptance is a separate gate.
 
 ## Roadmap and release gates
 

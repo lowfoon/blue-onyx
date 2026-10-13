@@ -37,6 +37,7 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: ${{ github.event_name == 'release' }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/blue_onyx:${{ github.event.release.tag_name || 'validation' }}-${{ matrix.variant }}
             ghcr.io/${{ github.repository_owner }}/blue_onyx:${{ matrix.variant }}
