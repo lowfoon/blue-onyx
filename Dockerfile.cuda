@@ -12,13 +12,15 @@ COPY . .
 RUN cargo test --locked --lib --features cuda && cargo build --locked --release --bin blue_onyx --features cuda
 
 FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libssl3 && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libssl3t64 && \
     rm -rf /var/lib/apt/lists/* && \
     useradd --uid 10001 --create-home blueonyx && \
     mkdir -p /app/config /app/models && chown -R blueonyx:blueonyx /app
 WORKDIR /app
 COPY --from=builder /src/target/release/blue_onyx ./blue_onyx
 COPY --from=builder /opt/ort/lib/ ./ort-libs/
+COPY --from=builder /src/LICENSE ./LICENSE
+COPY --from=builder /opt/ort/LICENSE /opt/ort/ThirdPartyNotices.txt ./notices/onnxruntime/
 ENV ORT_DYLIB_PATH=/app/ort-libs/libonnxruntime.so \
     LD_LIBRARY_PATH=/app/ort-libs:/usr/local/cuda/lib64:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     BLUE_ONYX_CONFIG_PATH=/app/config/blue_onyx_config.json \

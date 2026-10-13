@@ -84,6 +84,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 WORKDIR /app
 COPY --from=builder --chown=openvino:openvino /src/target/release/blue_onyx ./blue_onyx
 COPY --from=onnxruntime --chown=openvino:openvino /opt/ort-libs ./ort-libs
+COPY --from=builder /src/LICENSE ./LICENSE
+COPY --from=onnxruntime /opt/onnxruntime/LICENSE /opt/onnxruntime/ThirdPartyNotices.txt ./notices/onnxruntime/
 
 USER openvino
 EXPOSE 32168

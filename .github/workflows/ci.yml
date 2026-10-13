@@ -17,10 +17,13 @@ jobs:
         include:
           - os: ubuntu-latest
             archive: onnxruntime-linux-x64-1.29.0.tgz
+            checksum: c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba
           - os: macos-latest
             archive: onnxruntime-osx-arm64-1.29.0.tgz
+            checksum: d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
           - os: windows-latest
             archive: onnxruntime-win-x64-1.29.0.zip
+            checksum: c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,9 +34,11 @@ jobs:
         shell: bash
         env:
           ARCHIVE: ${{ matrix.archive }}
+          CHECKSUM: ${{ matrix.checksum }}
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download v1.29.0 --repo microsoft/onnxruntime --pattern "$ARCHIVE" --dir "$RUNNER_TEMP"
+          echo "$CHECKSUM  $RUNNER_TEMP/$ARCHIVE" | shasum -a 256 -c -
           if [[ "$ARCHIVE" == *.zip ]]; then
             unzip -q "$RUNNER_TEMP/$ARCHIVE" -d "$RUNNER_TEMP/ort"
           else
@@ -61,11 +66,20 @@ jobs:
           echo "BLUE_ONYX_ORT_LIB_DIR=$RUNNER_TEMP/ort/lib" >> "$GITHUB_ENV"
       - run: cargo test --locked --all-targets --features cuda
       - run: cargo clippy --locked --all-targets --features cuda -- -D warnings
-  docker-cpu:
+  docker:
+    name: docker-${{ matrix.variant }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            dockerfile: Dockerfile
+          - variant: cuda
+            dockerfile: Dockerfile.cuda
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t blue-onyx:ci .
+      - run: docker build -f "${{ matrix.dockerfile }}" -t blue-onyx:ci .
       - name: Verify container liveness and SIGTERM
         run: |
           docker run -d --name blueonyx-ci -p 127.0.0.1:32168:32168 blue-onyx:ci --model /missing/model.onnx

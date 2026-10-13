@@ -19,6 +19,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY --from=builder /src/target/release/blue_onyx ./blue_onyx
 COPY --from=builder /opt/ort/lib/ ./ort-libs/
+COPY --from=builder /src/LICENSE ./LICENSE
+COPY --from=builder /opt/ort/LICENSE /opt/ort/ThirdPartyNotices.txt ./notices/onnxruntime/
 ENV ORT_DYLIB_PATH=/app/ort-libs/libonnxruntime.so \
     LD_LIBRARY_PATH=/app/ort-libs \
     BLUE_ONYX_CONFIG_PATH=/app/config/blue_onyx_config.json \

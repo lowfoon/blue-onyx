@@ -101,4 +101,4 @@ Use `.dylib` on macOS. The script uses a temporary config/model directory and ep
 
 ## Before publishing
 
-Run Linux builds and actual NVIDIA/Intel inference on the intended hardware. Migrate update/installer endpoints to this fork and audit the inherited release workflow: it references an absent `install_latest_blue_onyx.ps1`. Document model redistribution licenses and maintain third-party notices. The new Docker publish workflow builds the exact published release tag; manual dispatch only validates builds. No release image is claimed as available yet.
+Run Linux builds and actual NVIDIA/Intel inference on the intended hardware. Migrate update/installer endpoints to this fork and audit the inherited release workflow: it references an absent `install_latest_blue_onyx.ps1`. Document model redistribution licenses. The containers retain the service MIT license and ONNX Runtime license/notices; model and provider redistribution requirements still need their own records. The new Docker publish workflow builds the exact published release tag; manual dispatch only validates builds. No release image is claimed as available yet.

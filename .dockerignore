@@ -1,7 +1,6 @@
 .git
 target
 models/*.onnx
-.git
 config
 logs
 *.onnx
