@@ -16,53 +16,31 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
-    // Set up Ctrl+C handler once, outside the restart loop
-    let global_shutdown = tokio_util::sync::CancellationToken::new();
-    let ctrl_c_shutdown = global_shutdown.clone();
-
-    rt.spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        info!("Ctrl+C received, shutting down server");
-        ctrl_c_shutdown.cancel();
-    });
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
 
     loop {
-        let (blue_onyx_service_future, cancellation_token, restart_token) =
+        let (service, cancellation_token, _restart_token) =
             create_blue_onyx_service(current_args.clone())?;
-
-        let should_restart = rt.block_on(async {
-            // Wait for either the service to complete, restart to be requested, or global shutdown
+        let (should_restart, worker_handle) = rt.block_on(async {
+            tokio::pin!(service);
             tokio::select! {
-                result = blue_onyx_service_future => {
-                    match result {
-                        Ok((restart_requested, worker_handle)) => {
-                            // Wait for worker thread to complete if available
-                            if let Some(handle) = worker_handle {
-                                info!("Waiting for worker thread to complete...");
-                                if let Err(e) = handle.join() {
-                                    error!("Worker thread panicked: {:?}", e);
-                                }
-                            }
-                            restart_requested
-                        },
-                        Err(e) => {
-                            error!("Service failed: {}", e);
-                            false // Don't restart on error
-                        }
-                    }
+                biased;
+                signal = &mut shutdown => {
+                    signal?;
+                    info!("Shutdown signal received, draining requests");
+                    cancellation_token.cancel();
+                    service.await.map(|(_, handle)| (false, handle))
                 }
-                _ = restart_token.cancelled() => {
-                    info!("Restart requested via API");
-                    true // Restart requested
-                }                _ = global_shutdown.cancelled() => {
-                    info!("Global shutdown requested");
-                    cancellation_token.cancel(); // Cancel the current service
-                    false // Don't restart, just exit
-                }
+                result = &mut service => result,
             }
-        });
+        })?;
+        // The server has released its queue sender; the worker can now finish.
+        if let Some(handle) = worker_handle
+            && let Err(error) = handle.join()
+        {
+            error!(?error, "Worker thread panicked");
+        }
         if should_restart {
             info!("Restarting server with updated configuration...");
 
@@ -89,5 +67,20 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }

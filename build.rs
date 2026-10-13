@@ -76,6 +76,27 @@ fn main() {
             }
         }
 
+        if cfg!(all(target_os = "linux", feature = "cuda")) {
+            for name in [
+                "libonnxruntime_providers_shared.so",
+                "libonnxruntime_providers_cuda.so",
+            ] {
+                assert!(
+                    prebuilt_dir.join(name).is_file(),
+                    "Required CUDA runtime library missing: {name}"
+                );
+            }
+        }
+
+        if cfg!(all(target_os = "linux", feature = "webgpu")) {
+            assert!(
+                prebuilt_dir
+                    .join("libonnxruntime_providers_webgpu.so")
+                    .is_file(),
+                "Required native WebGPU plugin library missing; see scripts/fetch_webgpu_runtime.py"
+            );
+        }
+
         build_warning!(
             "Using prebuilt ONNX Runtime from {}",
             prebuilt_dir.display()
@@ -86,6 +107,18 @@ fn main() {
         copy_onnxruntime_libraries(prebuilt_dir, &output_dir);
         println!("cargo:rustc-env=ORT_DYLIB_PATH={shared_lib_name}");
         return;
+    }
+
+    if cfg!(all(target_os = "linux", feature = "cuda")) {
+        panic!(
+            "CUDA builds require BLUE_ONYX_ORT_LIB_DIR pointing to a prebuilt CUDA-enabled ONNX Runtime; see Dockerfile.cuda"
+        );
+    }
+
+    if cfg!(all(target_os = "linux", feature = "webgpu")) {
+        panic!(
+            "WebGPU builds require BLUE_ONYX_ORT_LIB_DIR pointing to the compatible prebuilt runtime; see Dockerfile.webgpu"
+        );
     }
 
     check_and_download_onnx_source(&out_dir);

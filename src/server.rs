@@ -18,7 +18,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use chrono::Utc;
-use crossbeam::channel::Sender;
+use crossbeam::channel::{Sender, TrySendError};
 use mime::IMAGE_JPEG;
 use reqwest;
 use serde::Deserialize;
@@ -33,7 +33,7 @@ use tokio::{
     time::{Duration, timeout},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 const MEGABYTE: usize = 1024 * 1024; // 1 MB = 1024 * 1024 bytes
 const THIRTY_MEGABYTES: usize = 30 * MEGABYTE; // 30 MB in bytes
@@ -58,10 +58,12 @@ struct ServerState {
     metrics: Mutex<Metrics>,
     restart_token: CancellationToken,
     config_path: PathBuf,
+    request_timeout: Duration,
 }
 
 pub async fn run_server(
     port: u16,
+    request_timeout: Duration,
     cancellation_token: CancellationToken,
     restart_token: CancellationToken,
     detector_init_receiver: tokio::sync::oneshot::Receiver<InitResult>,
@@ -74,11 +76,12 @@ pub async fn run_server(
         metrics: Mutex::new(metrics),
         restart_token: restart_token.clone(),
         config_path,
+        request_timeout,
     });
 
     // Spawn a task to wait for detector initialization and update the server state
     let state_clone = server_state.clone();
-    tokio::spawn(async move {
+    let init_task = tokio::spawn(async move {
         match detector_init_receiver.await {
             Ok(InitResult::Success {
                 sender,
@@ -120,7 +123,46 @@ pub async fn run_server(
             }
         }
     });
-    let blue_onyx = Router::new()
+    let blue_onyx = create_router(server_state.clone());
+
+    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+    info!("Starting server, listening on {}", addr);
+    info!("Welcome page, http://127.0.0.1:{}", port);
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            error!(
+                "Looks like {port} is already in use either by Blue Onyx, CPAI or another application, please turn off the other application or pick another port with --port"
+            );
+            init_task.abort();
+            return Err(e.into());
+        }
+        Err(e) => {
+            init_task.abort();
+            return Err(e.into());
+        }
+    };
+
+    let restart_check = restart_token.clone();
+    axum::serve(listener, blue_onyx.into_make_service())
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {},
+                _ = restart_check.cancelled() => {},
+            }
+        })
+        .await?; // Return true if restart was requested, false if normal shutdown
+    // Also return the worker thread handle if available for clean shutdown
+    init_task.abort();
+    let _ = init_task.await;
+    let worker_handle = server_state.take_worker_thread_handle().await;
+    Ok((restart_token.is_cancelled(), worker_handle))
+}
+
+fn create_router(server_state: Arc<ServerState>) -> Router {
+    Router::new()
+        .route("/health/live", get(|| async { StatusCode::OK }))
+        .route("/health/ready", get(readiness_handler))
         .route("/", get(welcome_handler))
         .route(
             "/v1/status/updateavailable",
@@ -140,35 +182,8 @@ pub async fn run_server(
             get(bootstrap_icons_css_handler),
         )
         .fallback(fallback_handler)
-        .with_state(server_state.clone())
-        .layer(DefaultBodyLimit::max(THIRTY_MEGABYTES));
-
-    let addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
-    info!("Starting server, listening on {}", addr);
-    info!("Welcome page, http://127.0.0.1:{}", port);
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            error!(
-                "Looks like {port} is already in use either by Blue Onyx, CPAI or another application, please turn off the other application or pick another port with --port"
-            );
-            return Err(e.into());
-        }
-        Err(e) => return Err(e.into()),
-    };
-
-    let restart_check = restart_token.clone();
-    axum::serve(listener, blue_onyx.into_make_service())
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = cancellation_token.cancelled() => {},
-                _ = restart_check.cancelled() => {},
-            }
-        })
-        .await?; // Return true if restart was requested, false if normal shutdown
-    // Also return the worker thread handle if available for clean shutdown
-    let worker_handle = server_state.take_worker_thread_handle().await;
-    Ok((restart_token.is_cancelled(), worker_handle))
+        .with_state(server_state)
+        .layer(DefaultBodyLimit::max(THIRTY_MEGABYTES))
 }
 
 #[derive(Template)]
@@ -214,7 +229,18 @@ async fn v1_vision_detection(
     while let Some(field) = multipart.next_field().await? {
         match field.name() {
             Some("min_confidence") => {
-                vision_request.min_confidence = field.text().await?.parse::<f32>()?;
+                vision_request.min_confidence =
+                    field.text().await?.parse::<f32>().map_err(|error| {
+                        BlueOnyxError::with_status(StatusCode::BAD_REQUEST, error)
+                    })?;
+                if !vision_request.min_confidence.is_finite()
+                    || !(0.0..=1.0).contains(&vision_request.min_confidence)
+                {
+                    return Err(BlueOnyxError::with_status(
+                        StatusCode::BAD_REQUEST,
+                        anyhow::anyhow!("min_confidence must be finite and between 0 and 1"),
+                    ));
+                }
             }
             Some("image") => {
                 if let Some(image_name) = field.file_name().map(|s| s.to_string()) {
@@ -227,69 +253,28 @@ async fn v1_vision_detection(
         }
     }
 
-    // Check detector state first
-    let detector_ready = server_state.detector_ready.lock().await;
-    match &*detector_ready {
-        DetectorReady::NotReady => {
-            // Detector is still initializing, return not ready
-            Err(BlueOnyxError(anyhow::anyhow!(
-                "Server not ready yet, detector is still initializing"
-            )))
-        }
-        DetectorReady::Failed(error_msg) => {
-            // Detector initialization failed
-            Err(BlueOnyxError(anyhow::anyhow!(
-                "Detector initialization failed: {}",
-                error_msg
-            )))
-        }
-        DetectorReady::Ready {
-            sender,
-            detector_info: _,
-            worker_thread_handle: _,
-        } => {
-            // Detector is ready, proceed with request
-            let (response_sender, receiver) = tokio::sync::oneshot::channel();
+    if vision_request.image_data.is_empty() {
+        return Err(BlueOnyxError::with_status(
+            StatusCode::BAD_REQUEST,
+            anyhow::anyhow!("A non-empty image field is required"),
+        ));
+    }
+    let response = server_state
+        .detect(vision_request, request_start_time)
+        .await?;
+    Ok(Json(response))
+}
 
-            if sender.is_full() {
-                warn!("Worker queue is full server is overloaded, rejecting request");
-                drop(detector_ready); // Release the lock
-                update_dropped_requests(server_state).await;
-                return Err(BlueOnyxError(anyhow::anyhow!("Worker queue is full")));
-            }
-
-            if let Err(err) = sender.send((vision_request, response_sender, request_start_time)) {
-                warn!(?err, "Failed to send request to detection worker");
-                drop(detector_ready); // Release the lock
-                update_dropped_requests(server_state).await;
-                return Err(BlueOnyxError(anyhow::anyhow!("Worker queue is full")));
-            }
-
-            drop(detector_ready); // Release the lock before waiting
-            let result = timeout(Duration::from_secs(30), receiver).await;
-
-            let mut vision_response = match result {
-                Ok(Ok(response)) => response,
-                Ok(Err(err)) => {
-                    warn!("Failed to receive vision detection response: {:?}", err);
-                    update_dropped_requests(server_state).await;
-                    return Err(BlueOnyxError::from(err));
-                }
-                Err(_) => {
-                    warn!("Timeout while waiting for vision detection response");
-                    update_dropped_requests(server_state).await;
-                    return Err(BlueOnyxError::from(anyhow::anyhow!("Operation timed out")));
-                }
-            };
-            vision_response.analysisRoundTripMs = request_start_time.elapsed().as_millis() as i32;
-
-            {
-                let mut metrics = server_state.metrics.lock().await;
-                metrics.update_metrics(&vision_response);
-            }
-
-            Ok(Json(vision_response))
-        }
+async fn readiness_handler(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    let detector = state.detector_ready.lock().await;
+    let ready = matches!(&*detector, DetectorReady::Ready {
+        worker_thread_handle: Some(handle), ..
+    } if !handle.is_finished())
+        && !state.restart_token.is_cancelled();
+    if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
     }
 }
 
@@ -781,7 +766,7 @@ async fn fallback_handler(req: Request<Body>) -> impl IntoResponse {
     let uri = req.uri().clone();
     let headers = req.headers().clone();
 
-    let body_bytes = body::to_bytes(req.into_body(), usize::MAX)
+    let body_bytes = body::to_bytes(req.into_body(), THIRTY_MEGABYTES)
         .await
         .unwrap_or_else(|_| body::Bytes::new());
 
@@ -915,31 +900,94 @@ impl Metrics {
             ExecutionProvider::CoreML => "CoreML".to_string(),
             #[cfg(all(target_os = "linux", feature = "openvino"))]
             ExecutionProvider::OpenVINO(index) => format!("OpenVINO(GPU {index})"),
+            #[cfg(all(target_os = "linux", feature = "cuda"))]
+            ExecutionProvider::CUDA(index) => format!("CUDA(GPU {index})"),
+            #[cfg(all(target_os = "linux", feature = "webgpu"))]
+            ExecutionProvider::WebGPU(index) => format!("WebGPU(GPU {index})"),
         };
     }
 }
 
 impl ServerState {
+    async fn detect(
+        &self,
+        request: VisionDetectionRequest,
+        started: Instant,
+    ) -> Result<VisionDetectionResponse, BlueOnyxError> {
+        let remaining = self
+            .request_timeout
+            .checked_sub(started.elapsed())
+            .filter(|duration| !duration.is_zero())
+            .ok_or_else(|| {
+                BlueOnyxError::with_status(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    anyhow::anyhow!("Request deadline exceeded"),
+                )
+            })?;
+        let sender = {
+            let ready = self.detector_ready.lock().await;
+            match &*ready {
+                DetectorReady::Ready { sender, .. } => sender.clone(),
+                DetectorReady::NotReady => {
+                    return Err(BlueOnyxError::with_status(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        anyhow::anyhow!("Detector is initializing"),
+                    ));
+                }
+                DetectorReady::Failed(error) => {
+                    return Err(BlueOnyxError::with_status(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        anyhow::anyhow!("Detector initialization failed: {error}"),
+                    ));
+                }
+            }
+        };
+        let (response_sender, receiver) = oneshot::channel();
+        if let Err(error) = sender.try_send((request, response_sender, started)) {
+            self.metrics.lock().await.update_dropped_requests();
+            let message = match error {
+                TrySendError::Full(_) => "Worker queue is full",
+                TrySendError::Disconnected(_) => "Detection worker is unavailable",
+            };
+            return Err(BlueOnyxError::with_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                anyhow::anyhow!(message),
+            ));
+        }
+        let mut response = match timeout(remaining, receiver).await {
+            Ok(Ok(response)) => response,
+            other => {
+                self.metrics.lock().await.update_dropped_requests();
+                let (status, message) = match other {
+                    Err(_) => (StatusCode::GATEWAY_TIMEOUT, "Request deadline exceeded"),
+                    _ if started.elapsed() >= self.request_timeout => {
+                        (StatusCode::GATEWAY_TIMEOUT, "Request deadline exceeded")
+                    }
+                    _ => (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Detection worker is unavailable",
+                    ),
+                };
+                return Err(BlueOnyxError::with_status(status, anyhow::anyhow!(message)));
+            }
+        };
+        response.analysisRoundTripMs = started.elapsed().as_millis().min(i32::MAX as u128) as i32;
+        self.metrics.lock().await.update_metrics(&response);
+        Ok(response)
+    }
+
     /// Extract the worker thread handle for clean shutdown
     /// Returns the handle if the detector is ready, None otherwise
     pub async fn take_worker_thread_handle(&self) -> Option<std::thread::JoinHandle<()>> {
         let mut detector_ready = self.detector_ready.lock().await;
-        match &mut *detector_ready {
+        match std::mem::replace(&mut *detector_ready, DetectorReady::NotReady) {
             DetectorReady::Ready {
                 worker_thread_handle,
                 ..
-            } => worker_thread_handle.take(),
+            } => worker_thread_handle,
             _ => None,
         }
     }
-}
-
-async fn update_dropped_requests(server_state: Arc<ServerState>) {
-    warn!(
-        "If you see this message spamming you should reduce the number of requests or upgrade your service to be faster."
-    );
-    let mut metrics = server_state.metrics.lock().await;
-    metrics.update_dropped_requests();
 }
 
 #[derive(Template)]
@@ -980,98 +1028,46 @@ async fn handle_upload(
                 image_name: "image.jpg".to_string(),
             };
 
-            // Check detector state first
-            let detector_ready = server_state.detector_ready.lock().await;
-
-            match &*detector_ready {
-                DetectorReady::NotReady => {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        "Server not ready yet, detector is still initializing",
-                    )
-                        .into_response();
-                }
-                DetectorReady::Failed(error_msg) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Detector initialization failed: {error_msg}"),
-                    )
-                        .into_response();
-                }
-                DetectorReady::Ready {
-                    sender,
-                    detector_info: _,
-                    worker_thread_handle: _,
-                } => {
-                    let (response_sender, receiver) = tokio::sync::oneshot::channel();
-                    if let Err(err) =
-                        sender.send((vision_request, response_sender, request_start_time))
-                    {
-                        error!(?err, "Failed to send request to detection worker");
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to send request")
-                            .into_response();
-                    }
-
-                    drop(detector_ready); // Release the lock before waiting
-                    let result = timeout(Duration::from_secs(30), receiver).await;
-
-                    let mut vision_response = match result {
-                        Ok(Ok(response)) => response,
-                        Ok(Err(err)) => {
-                            error!("Failed to receive vision detection response: {:?}", err);
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "Failed to receive response",
-                            )
+            match server_state
+                .detect(vision_request, request_start_time)
+                .await
+            {
+                Ok(response) if response.success => {
+                    match crate::image::draw_boundary_boxes_on_encoded_image(
+                        data,
+                        &response.predictions,
+                        640,
+                        640,
+                    ) {
+                        Ok(image) => {
+                            return ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], image)
                                 .into_response();
                         }
-                        Err(_) => {
-                            error!("Timeout while waiting for vision detection response");
-                            return (StatusCode::INTERNAL_SERVER_ERROR, "Timeout").into_response();
-                        }
-                    };
-
-                    let template = TestTemplate;
-
-                    vision_response.analysisRoundTripMs =
-                        request_start_time.elapsed().as_millis() as i32;
-
-                    {
-                        let mut metrics = server_state.metrics.lock().await;
-                        metrics.update_metrics(&vision_response);
-                    }
-                    match template.render() {
-                        Ok(body) => {
-                            return (
-                                [
-                                    (CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
-                                    (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                                ],
-                                body,
-                            )
-                                .into_response();
-                        }
-                        Err(e) => {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Template error: {e}"),
-                            )
-                                .into_response();
-                        }
+                        Err(error) => return BlueOnyxError::from(error).into_response(),
                     }
                 }
+                Ok(response) => {
+                    return (StatusCode::UNPROCESSABLE_ENTITY, Json(response)).into_response();
+                }
+                Err(error) => return error.into_response(),
             }
         }
     }
     (StatusCode::BAD_REQUEST, "No image field found").into_response()
 }
 
-struct BlueOnyxError(anyhow::Error);
+struct BlueOnyxError(anyhow::Error, StatusCode);
+
+impl BlueOnyxError {
+    fn with_status(status: StatusCode, error: impl Into<anyhow::Error>) -> Self {
+        Self(error.into(), status)
+    }
+}
 
 impl IntoResponse for BlueOnyxError {
     fn into_response(self) -> Response {
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            self.1,
             Json(VisionDetectionResponse {
                 success: false,
                 message: "".into(),
@@ -1096,7 +1092,7 @@ where
     E: Into<anyhow::Error>,
 {
     fn from(err: E) -> Self {
-        Self(err.into())
+        Self(err.into(), StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -1277,5 +1273,235 @@ fn update_config_from_form_data(
         } else {
             Some(PathBuf::from(save_stats_str))
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    fn state(detector: DetectorReady, deadline: Duration) -> Arc<ServerState> {
+        Arc::new(ServerState {
+            detector_ready: Mutex::new(detector),
+            metrics: Mutex::new(Metrics::new("test".into(), "CPU".into())),
+            restart_token: CancellationToken::new(),
+            config_path: PathBuf::from("unused-test-config.json"),
+            request_timeout: deadline,
+        })
+    }
+
+    fn request() -> VisionDetectionRequest {
+        VisionDetectionRequest {
+            image_data: Bytes::from_static(b"fixture"),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn liveness_and_readiness_reflect_initialization_and_worker_exit() {
+        let state = state(DetectorReady::NotReady, Duration::from_secs(1));
+        let router = create_router(state.clone());
+        for (path, expected) in [
+            ("/health/live", StatusCode::OK),
+            ("/health/ready", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let handle = std::thread::spawn(move || {
+            let _ = receiver.recv();
+        });
+        *state.detector_ready.lock().await = DetectorReady::Ready {
+            sender,
+            detector_info: DetectorInfo {
+                model_name: "test".into(),
+                execution_provider: ExecutionProvider::CPU,
+            },
+            worker_thread_handle: Some(handle),
+        };
+        assert_eq!(
+            readiness_handler(State(state.clone()))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::OK
+        );
+        state.restart_token.cancel();
+        assert_eq!(
+            readiness_handler(State(state.clone()))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        state
+            .take_worker_thread_handle()
+            .await
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(
+            readiness_handler(State(state))
+                .await
+                .into_response()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_queue_rejects_without_blocking_the_async_executor() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let (reply, _) = oneshot::channel();
+        sender.send((request(), reply, Instant::now())).unwrap();
+        let state = state(
+            DetectorReady::Ready {
+                sender,
+                detector_info: DetectorInfo {
+                    model_name: "test".into(),
+                    execution_provider: ExecutionProvider::CPU,
+                },
+                worker_thread_handle: None,
+            },
+            Duration::from_secs(1),
+        );
+        let result = state.detect(request(), Instant::now()).await;
+        let Err(error) = result else {
+            panic!("Full queue accepted a request")
+        };
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(receiver.len(), 1);
+        assert_eq!(state.metrics.lock().await.dropped_requests, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn request_deadline_includes_time_before_enqueue() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let state = state(
+            DetectorReady::Ready {
+                sender,
+                detector_info: DetectorInfo {
+                    model_name: "test".into(),
+                    execution_provider: ExecutionProvider::CPU,
+                },
+                worker_thread_handle: None,
+            },
+            Duration::from_millis(30),
+        );
+        let started = Instant::now() - Duration::from_millis(20);
+        let Err(error) = state.detect(request(), started).await else {
+            panic!("Request did not time out")
+        };
+        assert_eq!(error.into_response().status(), StatusCode::GATEWAY_TIMEOUT);
+        let (_, response_sender, _) = receiver.recv().unwrap();
+        assert!(
+            response_sender.is_closed(),
+            "Expired request must cancel its response receiver"
+        );
+        let expired = Instant::now() - Duration::from_secs(1);
+        assert!(state.detect(request(), expired).await.is_err());
+        assert!(
+            receiver.is_empty(),
+            "An already expired request must never enter the queue"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn detection_preserves_compatible_json_fields() {
+        let (sender, receiver) = crossbeam::channel::bounded::<(
+            VisionDetectionRequest,
+            oneshot::Sender<VisionDetectionResponse>,
+            Instant,
+        )>(1);
+        let worker = std::thread::spawn(move || {
+            let (_, response, _) = receiver.recv().unwrap();
+            response
+                .send(VisionDetectionResponse {
+                    success: true,
+                    command: "detect".into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        });
+        let state = state(
+            DetectorReady::Ready {
+                sender,
+                detector_info: DetectorInfo {
+                    model_name: "test".into(),
+                    execution_provider: ExecutionProvider::CPU,
+                },
+                worker_thread_handle: Some(worker),
+            },
+            Duration::from_secs(1),
+        );
+        let response = state
+            .detect(request(), Instant::now())
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.0));
+        let json = serde_json::to_value(response).unwrap();
+        for field in [
+            "success",
+            "predictions",
+            "count",
+            "inferenceMs",
+            "processMs",
+            "analysisRoundTripMs",
+            "canUseGPU",
+        ] {
+            assert!(
+                json.get(field).is_some(),
+                "Missing compatible field: {field}"
+            );
+        }
+        state
+            .take_worker_thread_handle()
+            .await
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_upload_is_rejected_before_detector_initialization() {
+        let router = create_router(state(DetectorReady::NotReady, Duration::from_secs(1)));
+        for confidence in ["NaN", "1.5", "invalid"] {
+            let body = format!(
+                "--boundary\r\nContent-Disposition: form-data; name=\"min_confidence\"\r\n\r\n{confidence}\r\n--boundary--\r\n"
+            );
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/vision/detection")
+                        .header("Content-Type", "multipart/form-data; boundary=boundary")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/vision/detection")
+                    .header("Content-Type", "multipart/form-data; boundary=boundary")
+                    .body(Body::from("--boundary--\r\n"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -4,6 +4,12 @@
 </div>
 
 
+# Blue Onyx Linux fork
+
+Development fork focused on Intel OpenVINO GPU inference and Linux/Docker reliability. Start with [FORK_GUIDE.md](FORK_GUIDE.md) for source-built CPU, NVIDIA CUDA, and Intel OpenVINO deployments. See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the architecture, audit findings, roadmap, and validation limits. GPU/container execution is awaiting Linux hardware validation.
+
+The sections below retain upstream platform documentation. Upstream release links refer to upstream builds; fork containers should be built using the guide above.
+
 # Object Detection Service
 
 Object detection service written in Rust with Onnx inference engine.
@@ -123,7 +129,7 @@ Download the `macos-aarch64` archive from the [latest release](https://github.co
 
 Blue Onyx automatically downloads and manages models for you:
 
-- **Default Model**: `rt-detrv2-s.onnx` is used by default
+- **Default Model**: `rf-detr-n.onnx` is used by default
 - **Auto-Download**: Models are downloaded automatically on first use
 - **Multiple Model Types**: RT-DETR v2 (general purpose) and YOLO5 (specialized)
 
@@ -155,11 +161,11 @@ blue_onyx --download-model-path ./models --download-yolo5
 ### Basic Usage
 
 ```bash
-# Start with default settings (auto-downloads rt-detrv2-s.onnx)
+# Start with default settings (auto-downloads rf-detr-n.onnx)
 blue_onyx
 
 # Start with specific model
-blue_onyx --model ./models/rt-detrv2-l.onnx
+blue_onyx --model ./models/rt-detrv2-l.onnx --object-detection-model-type rt-detrv2
 
 # Start with specialized model for delivery detection
 blue_onyx --model ./models/delivery.onnx --object-detection-model-type yolo5
@@ -169,16 +175,16 @@ blue_onyx --model ./models/delivery.onnx --object-detection-model-type yolo5
 
 ```bash
 # Custom port and confidence threshold
-blue_onyx --port 8080 --confidence_threshold 0.7
+blue_onyx --port 8080 --confidence-threshold 0.7
 
 # Filter for specific objects only
-blue_onyx --object_filter person,car,bicycle
+blue_onyx --object-filter person,car,bicycle
 
 # Force CPU usage (disable GPU)
-blue_onyx --force_cpu
+blue_onyx --force-cpu
 
 # Enable debug logging
-blue_onyx --log_level Debug
+blue_onyx --log-level debug
 ```
 
 ## Notes on Linux
@@ -226,15 +232,12 @@ blue_onyx_benchmark --save-image-path .
 
 ### Detect Objects in Images
 
-```bash
-# Upload image file
-curl -X POST -F "image=@test.jpg" http://localhost:32168/detect
-
-# Detect from URL
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"url": "https://example.com/image.jpg"}' \
-  http://localhost:32168/detect
+```sh
+curl -X POST -F "image=@test.jpg" -F "min_confidence=0.5" \
+  http://localhost:32168/v1/vision/detection
 ```
+
+The service accepts JPEG multipart uploads. JSON URL-based detection is not implemented.
 
 ### Web Interface
 

@@ -1,0 +1,20 @@
+services:
+  blue-onyx:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: blue-onyx:cpu-local
+    platform: linux/amd64
+    ports:
+      - "${BLUE_ONYX_BIND_IP:-127.0.0.1}:32168:32168"
+    volumes:
+      - config:/app/config
+      - models:/app/models
+    environment:
+      RUST_LOG: info
+    command: ["--force-cpu"]
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  config:
+  models:

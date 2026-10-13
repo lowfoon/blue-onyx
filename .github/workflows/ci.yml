@@ -2,228 +2,110 @@ name: ci
 on:
   pull_request:
   push:
-    branches:
-    - main
-  schedule:
-  - cron: '00 01 * * *'
+    branches: [main, 'fork/**']
   workflow_dispatch:
-    inputs:
-      test_installer:
-        description: 'Test installer build (will create pre-release)'
-        required: false
-        default: false
-        type: boolean
-      test_branch:
-        description: 'Simulate main branch behavior on this branch'
-        required: false
-        default: false
-        type: boolean
-
 permissions:
-  # to fetch code (actions/checkout)
-  contents: write  # Changed from 'read' to 'write' to allow creating releases
-
+  contents: read
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build-test-cpu:
-    name: build-test-cpu
-    env:
-      RUST_BACKTRACE: 1
-      RUSTFLAGS: ${{ matrix.os == 'macos-latest' && '-D warnings' || '-C target-cpu=native -D warnings' }}
-    runs-on: ${{ matrix.os }}
+  test:
     strategy:
       fail-fast: false
       matrix:
         include:
-        - build: win beta
-          os: windows-latest
-          rust: beta
-        - build: win nightly
-          os: windows-latest
-          rust: nightly
-        - build: win
-          os: windows-latest
-          rust: stable
-        - build: linux beta
-          os: ubuntu-latest
-          rust: beta
-        - build: linux nightly
-          os: ubuntu-latest
-          rust: nightly
-        - build: linux
-          os: ubuntu-latest
-          rust: stable
-        - build: macos aarch64
-          os: macos-latest
-          rust: stable
-
+          - os: ubuntu-latest
+            archive: onnxruntime-linux-x64-1.29.0.tgz
+            checksum: c3fddc4f139a045b0c4902c57410f0694f1c2fdf9b6939fbe38b1aeae7cd14ba
+          - os: macos-latest
+            archive: onnxruntime-osx-arm64-1.29.0.tgz
+            checksum: d0706fc34f315d8c88639d0a8c81f2e09e815f282cabed3493c06a054352cf92
+          - os: windows-latest
+            archive: onnxruntime-win-x64-1.29.0.zip
+            checksum: c9b4b7086b529ad814f428c1bad028e20a25d7dc0699836775faace4ab5b78b2
+    runs-on: ${{ matrix.os }}
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master
-      with:
-        toolchain: ${{ matrix.rust }}
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install dependencies
-      run: python -m pip install --upgrade pip setuptools wheel
-
-    - name: Install dependencies
-      run: python -m pip install flatbuffers numpy mypy pytest setuptools wheel onnx protobuf sympy psutil onnxscript
-
-    - name: Build release blue-onyx
-      env:
-        ONNX_CMAKE_GENERATOR: ${{ runner.os == 'Windows' && 'Visual Studio 18 2026' || '' }}
-      run: cargo build --release
-
-  rustfmt:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master
-      with:
-        toolchain: stable
-        components: rustfmt
-    - name: Check formatting
-      run: cargo fmt --all --check
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master
-      with:
-        toolchain: stable
-        components: clippy
-    - name: Check clippy
-      run: cargo clippy --all-targets -- -D warnings
-
-  docs:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-      - name: Check documentation
+          components: rustfmt, clippy
+      - name: Download official prebuilt runtime
+        shell: bash
         env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --no-deps --document-private-items --workspace
-
-  installer:
-    name: windows-installer
-    runs-on: windows-latest
-    timeout-minutes: 120
-    # Always run the installer job (build installer on all runs)
+          ARCHIVE: ${{ matrix.archive }}
+          CHECKSUM: ${{ matrix.checksum }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.29.0 --repo microsoft/onnxruntime --pattern "$ARCHIVE" --dir "$RUNNER_TEMP"
+          python -c 'import hashlib, os, pathlib; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / os.environ["ARCHIVE"]; actual = hashlib.sha256(p.read_bytes()).hexdigest(); assert actual == os.environ["CHECKSUM"], f"Checksum mismatch: {actual}"'
+          if [[ "$ARCHIVE" == *.zip ]]; then
+            unzip -q "$RUNNER_TEMP/$ARCHIVE" -d "$RUNNER_TEMP/ort"
+          else
+            mkdir -p "$RUNNER_TEMP/ort"
+            tar -xzf "$RUNNER_TEMP/$ARCHIVE" -C "$RUNNER_TEMP/ort"
+          fi
+          LIB_DIR=$(find "$RUNNER_TEMP/ort" -type d -name lib -print -quit)
+          echo "BLUE_ONYX_ORT_LIB_DIR=$LIB_DIR" >> "$GITHUB_ENV"
+      - run: cargo fmt --all --check
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets -- -D warnings
+  cuda-compile:
+    runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Get short commit hash
-      shell: bash
-      run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd41383119e8b1b35921 # master
-      with:
-        toolchain: stable
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install dependencies
-      run: python -m pip install --upgrade pip setuptools wheel
-
-    - name: Install dependencies
-      run: python -m pip install flatbuffers numpy mypy pytest setuptools wheel onnx protobuf sympy psutil onnxscript
-
-    - name: Build release
-      env:
-        ONNX_CMAKE_GENERATOR: Visual Studio 18 2026
-      run: cargo build --release
-
-    - name: Install cargo-packager and NSIS
-      shell: bash
-      run: |
-        cargo install cargo-packager
-        # Install NSIS
-        choco install nsis -y
-        # Add NSIS to PATH for current session
-        echo "C:/Program Files (x86)/NSIS" >> $GITHUB_PATH
-
-    - name: Build Windows installer
-      shell: bash
-      run: |
-        # Build the NSIS installer
-        cargo packager --release --formats nsis
-        # Get the version from Cargo.toml
-        VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-        
-        # Sanitize branch name by replacing / with - and other problematic characters
-        CLEAN_BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/[\/:]/-/g' | sed 's/[^a-zA-Z0-9._-]/-/g')
-        
-        # Determine naming based on branch and trigger type
-        if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-          # Main branch: normal naming
-          INSTALLER_NAME="blue_onyx-${VERSION}-${SHORT_SHA}-installer.exe"
-        elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          # Manual test: add -test- prefix and clean branch name
-          INSTALLER_NAME="blue_onyx-${VERSION}-test-${CLEAN_BRANCH_NAME}-${SHORT_SHA}-installer.exe"
-        else
-          # Feature branch: add -dev- prefix and clean branch name  
-          INSTALLER_NAME="blue_onyx-${VERSION}-dev-${CLEAN_BRANCH_NAME}-${SHORT_SHA}-installer.exe"
-        fi
-        
-        # Rename the installer
-        mv target/release/blue_onyx_*_x64-setup.exe "${INSTALLER_NAME}"
-        echo "INSTALLER_NAME=${INSTALLER_NAME}" >> $GITHUB_ENV
-
-    - name: Upload installer as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: blue-onyx-installer-${{ env.SHORT_SHA }}
-        path: blue_onyx-*-installer.exe
-        retention-days: 30
-
-    - name: Create pre-release with installer
-      if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.test_installer == 'true')
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      shell: bash
-      run: |
-        # Get version and create pre-release tag
-        VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-        TAG_NAME="v${VERSION}-${SHORT_SHA}"
-        
-        # Check if release with this commit already exists
-        if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-          echo "Release ${TAG_NAME} already exists for commit ${SHORT_SHA}, skipping..."
-          exit 0
-        fi
-        
-        # Create or update pre-release
-        gh release create "${TAG_NAME}" \
-          --title "Development Build ${VERSION}-${SHORT_SHA}" \
-          --notes "Automated development build from commit ${SHORT_SHA}" \
-          --prerelease \
-          --target ${{ github.sha }} \
-          "${INSTALLER_NAME}" || \
-        gh release upload "${TAG_NAME}" "${INSTALLER_NAME}" --clobber
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download CUDA runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v1.29.0 --repo microsoft/onnxruntime --pattern onnxruntime-linux-x64-gpu_cuda12-1.29.0.tgz --dir "$RUNNER_TEMP"
+          echo '4ca594a0da83927befbd73fe020d7f569be151d70bb4fe9741ad405f4882e2ad  '"$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.29.0.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/ort"
+          tar -xzf "$RUNNER_TEMP/onnxruntime-linux-x64-gpu_cuda12-1.29.0.tgz" --strip-components=1 -C "$RUNNER_TEMP/ort"
+          echo "BLUE_ONYX_ORT_LIB_DIR=$RUNNER_TEMP/ort/lib" >> "$GITHUB_ENV"
+      - run: cargo test --locked --all-targets --features cuda
+      - run: cargo clippy --locked --all-targets --features cuda -- -D warnings
+  docker:
+    name: docker-${{ matrix.variant }}
+    timeout-minutes: 90
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu
+            dockerfile: Dockerfile
+          - variant: cuda
+            dockerfile: Dockerfile.cuda
+          - variant: openvino
+            dockerfile: Dockerfile.openvino
+          - variant: webgpu
+            dockerfile: Dockerfile.webgpu
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f "${{ matrix.dockerfile }}" -t blue-onyx:ci .
+      - name: Verify container liveness and SIGTERM
+        run: |
+          docker run -d --name blueonyx-ci -p 127.0.0.1:32168:32168 blue-onyx:ci --model /missing/model.onnx
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:32168/health/live; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:32168/health/live
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32168/health/ready)" = 503
+          docker stop --time 10 blueonyx-ci
+          test "$(docker inspect -f '{{.State.ExitCode}}' blueonyx-ci)" = 0
+      - name: Extract native WebGPU test bundle
+        if: matrix.variant == 'webgpu'
+        run: |
+          mkdir -p "$RUNNER_TEMP/blue-onyx-webgpu"
+          docker cp blueonyx-ci:/app/blue_onyx "$RUNNER_TEMP/blue-onyx-webgpu/"
+          docker cp blueonyx-ci:/app/ort-libs "$RUNNER_TEMP/blue-onyx-webgpu/"
+          docker cp blueonyx-ci:/app/LICENSE "$RUNNER_TEMP/blue-onyx-webgpu/"
+      - uses: actions/upload-artifact@v4
+        if: matrix.variant == 'webgpu'
+        with:
+          name: blue-onyx-webgpu-linux-x64
+          path: ${{ runner.temp }}/blue-onyx-webgpu/
+          retention-days: 7

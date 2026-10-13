@@ -11,6 +11,8 @@ use crate::{
 use anyhow::{anyhow, bail};
 use bytes::Bytes;
 use ndarray::{Array, ArrayView, Axis, s};
+#[cfg(all(target_os = "linux", feature = "cuda"))]
+use ort::ep::CUDA;
 #[cfg(windows)]
 use ort::ep::DirectML;
 #[cfg(all(target_os = "linux", feature = "openvino"))]
@@ -598,7 +600,7 @@ impl Detector {
     pub fn new(detector_config: DetectorConfig) -> anyhow::Result<Self> {
         let (device_type, model_name, session, endpoint_provider, model_yaml_path, (width, height)) =
             initialize_onnx(&detector_config.object_detection_onnx_config)?; // Prioritize the YAML file that comes with the model over the configured one
-        let yaml_path_to_use = model_yaml_path.or(detector_config.object_classes);
+        let yaml_path_to_use = detector_config.object_classes.or(model_yaml_path);
 
         let object_classes = if let Some(yaml_path) = &yaml_path_to_use {
             info!("Using object classes from model YAML: {:?}", yaml_path);
@@ -923,11 +925,11 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
     let (num_intra_threads, num_inter_threads) = if onnx_config.force_cpu {
         let num_intra_threads = onnx_config
             .intra_threads
-            .min(num_cpus::get_physical() - 1)
+            .min(num_cpus::get_physical().saturating_sub(1).max(1))
             .min(16);
         let num_inter_threads = onnx_config
             .inter_threads
-            .min(num_cpus::get_physical() - 1)
+            .min(num_cpus::get_physical().saturating_sub(1).max(1))
             .min(16);
         info!(
             "Forcing CPU for inference with {} intra and {} inter threads",
@@ -955,11 +957,11 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
         } else {
             let num_intra_threads = onnx_config
                 .intra_threads
-                .min(num_cpus::get_physical() - 1)
+                .min(num_cpus::get_physical().saturating_sub(1).max(1))
                 .min(16);
             let num_inter_threads = onnx_config
                 .inter_threads
-                .min(num_cpus::get_physical() - 1)
+                .min(num_cpus::get_physical().saturating_sub(1).max(1))
                 .min(16);
             #[cfg(windows)]
             warn!(
@@ -987,6 +989,22 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
             (1, 1)
         }
 
+        #[cfg(all(target_os = "linux", feature = "cuda"))]
+        {
+            info!(
+                gpu_index = onnx_config.gpu_index,
+                "Configuring CUDA execution provider"
+            );
+            providers.push(
+                CUDA::default()
+                    .with_device_id(onnx_config.gpu_index)
+                    .build()
+                    .error_on_failure(),
+            );
+            device_type = DeviceType::GPU;
+            (1, 1)
+        }
+
         #[cfg(all(target_os = "linux", feature = "openvino"))]
         {
             let device = format!("GPU.{}", onnx_config.gpu_index);
@@ -1005,10 +1023,18 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
             (1, 1)
         }
 
+        #[cfg(all(target_os = "linux", feature = "webgpu"))]
+        {
+            device_type = DeviceType::GPU;
+            (1, 1)
+        }
+
         #[cfg(not(any(
             windows,
             target_os = "macos",
-            all(target_os = "linux", feature = "openvino")
+            all(target_os = "linux", feature = "openvino"),
+            all(target_os = "linux", feature = "cuda"),
+            all(target_os = "linux", feature = "webgpu")
         )))]
         {
             let num_intra_threads = onnx_config.intra_threads.min(16);
@@ -1019,14 +1045,7 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
     };
 
     // Simple model and yaml file handling
-    let model_filename = onnx_config
-        .model
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string());
-
-    let (model_path, yaml_path) = crate::ensure_model_files(model_filename)?;
+    let (model_path, yaml_path) = crate::resolve_model_files(onnx_config.model.clone())?;
     let model_bytes = std::fs::read(&model_path)?;
     let model_name = model_path
         .file_name()
@@ -1042,14 +1061,21 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
     // Build the session with the appropriate execution providers
     // Note: When providers list is empty (which is the case when force_cpu=true),
     // ONNX Runtime will default to CPU execution provider
-    let session = Session::builder()?
+    let session_builder = Session::builder()?
         .with_execution_providers(providers)
         .map_err(ort::Error::<()>::from)?
         .with_intra_threads(num_intra_threads)
         .map_err(ort::Error::<()>::from)?
         .with_inter_threads(num_inter_threads)
-        .map_err(ort::Error::<()>::from)?
-        .commit_from_memory(model_bytes.as_slice())?;
+        .map_err(ort::Error::<()>::from)?;
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    let session_builder = if onnx_config.force_cpu {
+        session_builder
+    } else {
+        crate::webgpu::configure_session(session_builder, onnx_config.gpu_index)?
+    };
+    let mut session_builder = session_builder;
+    let session = session_builder.commit_from_memory(model_bytes.as_slice())?;
 
     // Query the input size from the model
     let (width, height) = query_image_input_size(&session)?;
@@ -1066,6 +1092,10 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
         DeviceType::GPU => EndpointProvider::CoreML,
         #[cfg(all(target_os = "linux", feature = "openvino"))]
         DeviceType::GPU => EndpointProvider::OpenVINO,
+        #[cfg(all(target_os = "linux", feature = "cuda"))]
+        DeviceType::GPU => EndpointProvider::CUDA,
+        #[cfg(all(target_os = "linux", feature = "webgpu"))]
+        DeviceType::GPU => EndpointProvider::WebGPU,
         _ => EndpointProvider::CPU,
     };
     Ok((
@@ -1073,7 +1103,7 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
         model_name,
         session,
         endpoint_provider,
-        Some(yaml_path),
+        yaml_path,
         (width, height),
     ))
 }
@@ -1087,6 +1117,10 @@ pub enum EndpointProvider {
     CoreML,
     #[cfg(all(target_os = "linux", feature = "openvino"))]
     OpenVINO,
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    CUDA,
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    WebGPU,
 }
 
 impl std::fmt::Display for EndpointProvider {
@@ -1099,6 +1133,10 @@ impl std::fmt::Display for EndpointProvider {
             EndpointProvider::CoreML => write!(f, "CoreML"),
             #[cfg(all(target_os = "linux", feature = "openvino"))]
             EndpointProvider::OpenVINO => write!(f, "OpenVINO"),
+            #[cfg(all(target_os = "linux", feature = "cuda"))]
+            EndpointProvider::CUDA => write!(f, "CUDA"),
+            #[cfg(all(target_os = "linux", feature = "webgpu"))]
+            EndpointProvider::WebGPU => write!(f, "WebGPU"),
         }
     }
 }
@@ -1128,4 +1166,8 @@ pub enum ExecutionProvider {
     CoreML,
     #[cfg(all(target_os = "linux", feature = "openvino"))]
     OpenVINO(usize), // GPU index
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    CUDA(usize), // GPU index
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    WebGPU(usize),
 }

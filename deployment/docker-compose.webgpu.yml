@@ -1,0 +1,27 @@
+services:
+  blue-onyx:
+    build:
+      context: ..
+      dockerfile: Dockerfile.webgpu
+    image: blue-onyx:webgpu-local
+    platform: linux/amd64
+    ports:
+      - "${BLUE_ONYX_BIND_IP:-127.0.0.1}:${BLUE_ONYX_HOST_PORT:-32170}:32168"
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    group_add:
+      - "${RENDER_GID:?Set RENDER_GID to the host render device group ID}"
+    volumes:
+      - config:/app/config
+      - "${BLUE_ONYX_MODELS_DIR:?Set BLUE_ONYX_MODELS_DIR to the existing model directory}:/app/models:ro"
+      - shader-cache:/app/cache
+    command:
+      - --model
+      - /app/models/rt-detrv2-m.onnx
+      - --object-detection-model-type
+      - rt-detrv2
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  config:
+  shader-cache:

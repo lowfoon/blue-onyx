@@ -1,0 +1,26 @@
+services:
+  blue-onyx:
+    build:
+      context: ..
+      dockerfile: Dockerfile.cuda
+    image: blue-onyx:cuda-local
+    platform: linux/amd64
+    ports:
+      - "${BLUE_ONYX_BIND_IP:-127.0.0.1}:32168:32168"
+    volumes:
+      - config:/app/config
+      - models:/app/models
+    environment:
+      RUST_LOG: info
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  config:
+  models:
