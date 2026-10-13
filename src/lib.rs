@@ -1,3 +1,6 @@
+#[cfg(all(feature = "openvino", feature = "cuda"))]
+compile_error!("Select either the openvino or cuda feature for each build");
+
 use clap::ValueEnum;
 use cli::Cli;
 use detector::OnnxConfig;
@@ -37,6 +40,7 @@ pub fn blue_onyx_service(
     CancellationToken,
     CancellationToken, // Add restart token
 )> {
+    args.validate()?;
     // Get the config path for the server
     let config_path = args.get_current_config_path()?;
 
@@ -70,6 +74,7 @@ pub fn blue_onyx_service(
     let restart_token = CancellationToken::new();
     let server_future = run_server(
         args.port,
+        args.request_timeout,
         cancel_token.clone(),
         restart_token.clone(),
         detector_init_receiver,
@@ -120,10 +125,14 @@ pub fn log_available_gpus() {
     #[cfg(all(target_os = "linux", feature = "openvino"))]
     info!("OpenVINO GPU inference is enabled on Linux");
 
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    info!("CUDA GPU inference is enabled on Linux");
+
     #[cfg(not(any(
         windows,
         target_os = "macos",
-        all(target_os = "linux", feature = "openvino")
+        all(target_os = "linux", feature = "openvino"),
+        all(target_os = "linux", feature = "cuda")
     )))]
     info!("GPU acceleration not available on this platform - only CPU inference will be supported");
 
@@ -340,14 +349,44 @@ impl From<LogLevel> for Level {
 /// Ensures model and yaml files exist, downloading them if needed
 /// Returns the paths to the model and yaml files
 pub fn ensure_model_files(model_name: Option<String>) -> anyhow::Result<(PathBuf, PathBuf)> {
-    // Use default model if none provided
-    let model_filename = model_name.unwrap_or_else(|| NANO_RF_DETR_MODEL_FILE_NAME.to_string());
+    let (model, yaml) = resolve_model_files(model_name.map(PathBuf::from))?;
+    let yaml =
+        yaml.ok_or_else(|| anyhow::anyhow!("Model requires a companion YAML or --object-classes"))?;
+    Ok((model, yaml))
+}
 
-    // Get the directory where models are stored (next to the executable)
-    let exe_path = std::env::current_exe()?;
-    let models_dir = exe_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get parent directory of executable"))?;
+/// Resolve an existing custom path exactly; only catalog models are auto-downloaded.
+pub fn resolve_model_files(model: Option<PathBuf>) -> anyhow::Result<(PathBuf, Option<PathBuf>)> {
+    if let Some(path) = &model {
+        if path.is_file() {
+            let yaml = path.with_extension("yaml");
+            let yaml = yaml.is_file().then_some(yaml);
+            return Ok((path.clone(), yaml));
+        }
+        anyhow::ensure!(
+            path.components().count() == 1,
+            "Custom model does not exist: {}",
+            path.display()
+        );
+    }
+    let model_filename = model
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or(NANO_RF_DETR_MODEL_FILE_NAME)
+        .to_string();
+    anyhow::ensure!(
+        download_models::get_all_model_names().contains(&model_filename),
+        "Model is not in the download catalog and does not exist: {model_filename}"
+    );
+    let models_dir = if let Some(dir) = std::env::var_os("BLUE_ONYX_MODEL_DIR") {
+        PathBuf::from(dir)
+    } else {
+        std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get executable directory"))?
+            .to_path_buf()
+    };
+    let models_dir = models_dir.as_path();
 
     let model_path = models_dir.join(&model_filename);
     let yaml_filename = model_filename.replace(".onnx", ".yaml");
@@ -394,5 +433,31 @@ pub fn ensure_model_files(model_name: Option<String>) -> anyhow::Result<(PathBuf
         model_path.display(),
         yaml_path.display()
     );
-    Ok((model_path, yaml_path))
+    Ok((model_path, Some(yaml_path)))
+}
+
+#[cfg(test)]
+mod model_path_tests {
+    use super::*;
+
+    #[test]
+    fn custom_model_path_and_sidecar_are_preserved() {
+        let dir = std::env::temp_dir().join(format!("blueonyx-model-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let model = dir.join("rf-detr-n.onnx");
+        let yaml = model.with_extension("yaml");
+        std::fs::write(&model, b"local fixture").unwrap();
+        std::fs::write(&yaml, b"NAMES: [person]").unwrap();
+        assert_eq!(
+            resolve_model_files(Some(model.clone())).unwrap(),
+            (model.clone(), Some(yaml.clone()))
+        );
+        std::fs::remove_file(yaml).unwrap();
+        assert_eq!(
+            resolve_model_files(Some(model.clone())).unwrap(),
+            (model, None)
+        );
+        assert!(resolve_model_files(Some(dir.join("missing.onnx"))).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

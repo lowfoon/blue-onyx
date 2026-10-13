@@ -1,23 +1,24 @@
-version: '3.8'
 services:
   blue-onyx:
-    image: blue-onyx-openvino:0.8.0-openvino2
+    build:
+      context: ..
+      dockerfile: Dockerfile.openvino
+    platform: linux/amd64
+    image: blue-onyx:openvino-local
     container_name: blue-onyx
     ports:
-      - "32168:32168"
+      - "${BLUE_ONYX_BIND_IP:-127.0.0.1}:32168:32168"
     volumes:
-      - ../config:/app/config
-      - ../logs:/app/logs
+      - config:/app/config
+      - models:/app/models
     environment:
       - RUST_LOG=info
     devices:
       - /dev/dri/renderD128:/dev/dri/renderD128
-    command: >
-      --port 32168
-      --log-level info
-      --log-path /app/logs
-      --save-stats-path /app/logs
-      --request-timeout 30
+    group_add:
+      - "${RENDER_GID:?Set RENDER_GID to the host GPU render device group ID}"
     restart: unless-stopped
-    healthcheck:
-      disable: true
+    stop_grace_period: 45s
+volumes:
+  config:
+  models:

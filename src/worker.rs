@@ -48,7 +48,7 @@ impl DetectorWorker {
                 // images in 1000ms. This allows us to drop requests at the
                 // service level instead of the worker level.
                 let estimated_queue_size =
-                    (request_timeout.as_millis() / min_processing_time.as_millis()) as usize;
+                    estimate_queue_size(request_timeout, min_processing_time);
                 info!(
                     ?estimated_queue_size,
                     ?request_timeout,
@@ -76,6 +76,10 @@ impl DetectorWorker {
     pub fn run(&mut self) {
         info!("Detector worker thread: Starting detector worker loop");
         while let Ok((vision_request, response_sender, start_request_time)) = self.receiver.recv() {
+            if response_sender.is_closed() || start_request_time.elapsed() >= self.request_timeout {
+                debug!("Skipping cancelled or expired request before inference");
+                continue;
+            }
             let queue_time = start_request_time.elapsed();
             debug!(
                 ?queue_time,
@@ -169,5 +173,36 @@ impl DetectorWorker {
             }
             self.run();
         })
+    }
+}
+
+fn estimate_queue_size(timeout: Duration, processing_time: Duration) -> usize {
+    // Use nanoseconds to avoid division by zero for sub-millisecond inference.
+    // Bound the automatic queue to keep memory use and stale work predictable.
+    (timeout.as_nanos() / processing_time.as_nanos().max(1)).clamp(1, 64) as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_queue_handles_fast_and_slow_inference() {
+        assert_eq!(
+            estimate_queue_size(Duration::from_secs(1), Duration::ZERO),
+            64
+        );
+        assert_eq!(
+            estimate_queue_size(Duration::from_secs(1), Duration::from_micros(500)),
+            64
+        );
+        assert_eq!(
+            estimate_queue_size(Duration::from_secs(1), Duration::from_secs(2)),
+            1
+        );
+        assert_eq!(
+            estimate_queue_size(Duration::from_secs(1), Duration::from_millis(100)),
+            10
+        );
     }
 }

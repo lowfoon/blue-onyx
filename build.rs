@@ -76,6 +76,18 @@ fn main() {
             }
         }
 
+        if cfg!(all(target_os = "linux", feature = "cuda")) {
+            for name in [
+                "libonnxruntime_providers_shared.so",
+                "libonnxruntime_providers_cuda.so",
+            ] {
+                assert!(
+                    prebuilt_dir.join(name).is_file(),
+                    "Required CUDA runtime library missing: {name}"
+                );
+            }
+        }
+
         build_warning!(
             "Using prebuilt ONNX Runtime from {}",
             prebuilt_dir.display()
@@ -86,6 +98,12 @@ fn main() {
         copy_onnxruntime_libraries(prebuilt_dir, &output_dir);
         println!("cargo:rustc-env=ORT_DYLIB_PATH={shared_lib_name}");
         return;
+    }
+
+    if cfg!(all(target_os = "linux", feature = "cuda")) {
+        panic!(
+            "CUDA builds require BLUE_ONYX_ORT_LIB_DIR pointing to a prebuilt CUDA-enabled ONNX Runtime; see Dockerfile.cuda"
+        );
     }
 
     check_and_download_onnx_source(&out_dir);

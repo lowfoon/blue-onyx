@@ -10,6 +10,7 @@ homepage = "https://github.com/blue-onyx/blue-onyx"
 [features]
 default = []
 openvino = ["ort/openvino"]
+cuda = ["ort/cuda"]
 
 [dependencies]
 
@@ -122,3 +123,6 @@ opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

@@ -51,7 +51,7 @@ RUN bash ./build.sh \
     mkdir -p /opt/ort-libs && \
     cp -a build/Linux/Release/libonnxruntime*.so* /opt/ort-libs/
 
-FROM rust:bookworm AS builder
+FROM rust:1.99.0-bookworm AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends pkg-config libssl-dev && \
@@ -72,9 +72,13 @@ LABEL org.opencontainers.image.description="Blue Onyx with Linux OpenVINO GPU in
 ENV LD_LIBRARY_PATH=/app/ort-libs:${LD_LIBRARY_PATH}
 ENV ORT_DYLIB_PATH=/app/ort-libs/libonnxruntime.so
 ENV BLUE_ONYX_OPENVINO_CACHE_DIR=/app/config/openvino-cache
+ENV BLUE_ONYX_CONFIG_PATH=/app/config/blue_onyx_config.json
+ENV BLUE_ONYX_MODEL_DIR=/app/models
 
 USER root
-RUN mkdir -p /app/config/openvino-cache && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    mkdir -p /app/config/openvino-cache /app/models && \
     chown -R openvino:openvino /app
 
 WORKDIR /app
@@ -83,4 +87,6 @@ COPY --from=onnxruntime --chown=openvino:openvino /opt/ort-libs ./ort-libs
 
 USER openvino
 EXPOSE 32168
+HEALTHCHECK --interval=15s --timeout=3s --start-period=180s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:32168/health/ready || exit 1
 ENTRYPOINT ["./blue_onyx"]

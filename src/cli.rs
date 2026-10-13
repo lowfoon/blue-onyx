@@ -296,11 +296,13 @@ impl Cli {
             anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
         })?;
 
+        config.validate()?;
         Ok(config)
     }
 
     /// Save current configuration to a JSON file
     pub fn save_config(&self, path: &PathBuf) -> anyhow::Result<()> {
+        self.validate()?;
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
 
@@ -312,6 +314,9 @@ impl Cli {
 
     /// Get the default config file path next to the executable
     pub fn get_default_config_path() -> anyhow::Result<PathBuf> {
+        if let Some(path) = std::env::var_os("BLUE_ONYX_CONFIG_PATH") {
+            return Ok(PathBuf::from(path));
+        }
         let exe_path = std::env::current_exe()
             .map_err(|e| anyhow::anyhow!("Failed to get executable path: {}", e))?;
 
@@ -320,6 +325,25 @@ impl Cli {
             .ok_or_else(|| anyhow::anyhow!("Failed to get executable directory"))?;
 
         Ok(exe_dir.join("blue_onyx_config.json"))
+    }
+
+    /// Reject settings that would stall the queue or produce invalid detections.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.request_timeout.is_zero(),
+            "request_timeout must be positive"
+        );
+        anyhow::ensure!(
+            self.worker_queue_size != Some(0),
+            "worker_queue_size must be positive"
+        );
+        anyhow::ensure!(
+            self.confidence_threshold.is_finite()
+                && (0.0..=1.0).contains(&self.confidence_threshold),
+            "confidence_threshold must be finite and between 0 and 1"
+        );
+        anyhow::ensure!(self.gpu_index >= 0, "gpu_index must be non-negative");
+        Ok(())
     }
     /// Get the current config file path (either specified or default)
     pub fn get_current_config_path(&self) -> anyhow::Result<PathBuf> {
@@ -566,6 +590,35 @@ fn parse_duration(s: &str) -> anyhow::Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_queue_deadline_and_confidence_settings() {
+        for config in [
+            Cli {
+                request_timeout: Duration::ZERO,
+                ..Cli::default()
+            },
+            Cli {
+                worker_queue_size: Some(0),
+                ..Cli::default()
+            },
+            Cli {
+                confidence_threshold: f32::NAN,
+                ..Cli::default()
+            },
+            Cli {
+                confidence_threshold: 1.1,
+                ..Cli::default()
+            },
+            Cli {
+                gpu_index: -1,
+                ..Cli::default()
+            },
+        ] {
+            assert!(config.validate().is_err());
+        }
+        assert!(Cli::default().validate().is_ok());
+    }
 
     #[test]
     fn test_default_thread_values_are_capped() {
