@@ -35,7 +35,8 @@ Do not run CPU and GPU examples simultaneously on the same port. The Compose fil
 Compose binds to `127.0.0.1` by default. For a Blue Iris / Agent DVR machine elsewhere on a trusted LAN, set `BLUE_ONYX_BIND_IP` to the Linux host's LAN address, e.g.:
 
 ```sh
-BLUE_ONYX_BIND_IP=192.168.1.20 \
+RENDER_GID=$(stat -c '%g' /dev/dri/renderD128) \
+  BLUE_ONYX_BIND_IP=192.168.1.20 \
   docker compose -f deployment/docker-compose.yml up -d
 ```
 

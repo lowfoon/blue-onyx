@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -17,6 +18,8 @@ jobs:
             dockerfile: Dockerfile
           - variant: cuda
             dockerfile: Dockerfile.cuda
+          - variant: openvino
+            dockerfile: Dockerfile.openvino
     steps:
       - uses: actions/checkout@v4
         with:
