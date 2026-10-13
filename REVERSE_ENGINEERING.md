@@ -2,7 +2,7 @@
 
 Analysis date: 13 October 2026. Baseline: upstream `main` at
 [`1cd4d93d95b99a4456b7c856c94fb5654c908ad2`](https://github.com/xnorpx/blue-onyx/commit/1cd4d93d95b99a4456b7c856c94fb5654c908ad2).
-Target: Linux x86_64, Docker, and GPU inference while preserving the Blue Iris / Agent DVR HTTP contract.
+Primary target: Linux x86_64, Docker, and Intel integrated/discrete GPUs through OpenVINO, while preserving the Blue Iris / Agent DVR HTTP contract. NVIDIA CUDA is an optional secondary build.
 
 ## Conclusion
 
@@ -143,7 +143,7 @@ Deadlines do not interrupt an ONNX call already in progress. Dropping stale jobs
 - [Initial fork CI run](https://github.com/lowfoon/blue-onyx/actions/runs/38371794404): Linux, Windows and macOS all-target tests/lints passed; Linux CUDA tests/lints passed; CPU Docker source build, liveness, readiness failure, and SIGTERM lifecycle smoke passed.
 - Container packaging retains the service MIT license and ONNX Runtime license/notices.
 
-The local host has no Docker CLI and no Linux GPU test environment attached to this checkout. Linux and Windows compilation/tests were validated by CI, and the initial CPU container lifecycle smoke passed there. Actual CUDA/OpenVINO execution, real camera concurrency, and Windows NVR integration remain unvalidated. CI now also builds the CUDA container and checks its lifecycle without requiring a GPU; hardware acceptance is a separate gate.
+The local host has no Docker CLI and no Linux GPU test environment attached to this checkout. Linux and Windows compilation/tests were validated by CI, and the initial CPU container lifecycle smoke passed there. Actual CUDA/OpenVINO execution, real camera concurrency, and Windows NVR integration remain unvalidated. CI now also builds the Intel OpenVINO and NVIDIA CUDA containers and checks their lifecycle without requiring a GPU; hardware acceptance is a separate gate.
 
 ## Roadmap and release gates
 

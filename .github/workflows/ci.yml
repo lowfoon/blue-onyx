@@ -38,7 +38,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download v1.29.0 --repo microsoft/onnxruntime --pattern "$ARCHIVE" --dir "$RUNNER_TEMP"
-          echo "$CHECKSUM  $RUNNER_TEMP/$ARCHIVE" | shasum -a 256 -c -
+          python -c 'import hashlib, os, pathlib; p = pathlib.Path(os.environ["RUNNER_TEMP"]) / os.environ["ARCHIVE"]; actual = hashlib.sha256(p.read_bytes()).hexdigest(); assert actual == os.environ["CHECKSUM"], f"Checksum mismatch: {actual}"'
           if [[ "$ARCHIVE" == *.zip ]]; then
             unzip -q "$RUNNER_TEMP/$ARCHIVE" -d "$RUNNER_TEMP/ort"
           else
@@ -68,6 +68,7 @@ jobs:
       - run: cargo clippy --locked --all-targets --features cuda -- -D warnings
   docker:
     name: docker-${{ matrix.variant }}
+    timeout-minutes: 90
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -77,6 +78,8 @@ jobs:
             dockerfile: Dockerfile
           - variant: cuda
             dockerfile: Dockerfile.cuda
+          - variant: openvino
+            dockerfile: Dockerfile.openvino
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f "${{ matrix.dockerfile }}" -t blue-onyx:ci .

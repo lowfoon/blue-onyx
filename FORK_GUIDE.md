@@ -2,6 +2,16 @@
 
 This is the first development iteration of [lowfoon/blue-onyx](https://github.com/lowfoon/blue-onyx), based on upstream commit `1cd4d93`. See [the source analysis](REVERSE_ENGINEERING.md) for the architecture, confirmed bugs, remaining work, and validation limits.
 
+## Intel OpenVINO
+
+```sh
+# Use the group ID of the actual render device; include other groups if your driver requires them.
+RENDER_GID=$(stat -c '%g' /dev/dri/renderD128) \
+  docker compose -f deployment/docker-compose.yml up -d --build
+```
+
+This builds the existing OpenVINO source pipeline, mounts the render device, adds the host render group, and persists compiled-model cache, models, and config. The initial native build is substantially slower than CPU/CUDA's prebuilt-runtime path. Confirm `OpenVINO(GPU 0)` in `/stats` and actual Intel GPU activity before accepting the deployment.
+
 ## CPU or NVIDIA
 
 Run from the repository root on Linux x86_64 with Docker Compose:
@@ -14,21 +24,11 @@ docker compose -f deployment/docker-compose.cpu.yml up -d --build
 docker compose -f deployment/docker-compose.cuda.yml up -d --build
 ```
 
-The NVIDIA image is paired with ONNX Runtime 1.29's CUDA 12 build, CUDA 12.9, and cuDNN 9. Follow [NVIDIA's Container Toolkit installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to configure the host runtime. Verify `nvidia-smi` on the host and GPU visibility in a vendor test container before testing this service.
+The Intel OpenVINO deployment is the primary target; NVIDIA remains an optional alternative. The NVIDIA image is paired with ONNX Runtime 1.29's CUDA 12 build, CUDA 12.9, and cuDNN 9. Follow [NVIDIA's Container Toolkit installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to configure the host runtime. Verify `nvidia-smi` on the host and GPU visibility in a vendor test container before testing this service.
 
 The CUDA build fails detector initialization when provider registration fails. Check `/stats` for `CUDA(GPU 0)`, the container logs for provider errors, and host GPU utilization during requests. A provider label alone does not prove all graph nodes execute on GPU.
 
 Do not run CPU and GPU examples simultaneously on the same port. The Compose files use named volumes for configuration and models. First startup downloads `rf-detr-n.onnx` and its YAML; internet access is required for that download. Later starts reuse the volume. Initial downloads can exceed the 180-second healthcheck start period on a slow connection; inspect logs and allow extra time. Docker marking a container unhealthy does not automatically restart it.
-
-## Intel OpenVINO
-
-```sh
-# Use the group ID of the actual render device; include other groups if your driver requires them.
-RENDER_GID=$(stat -c '%g' /dev/dri/renderD128) \
-  docker compose -f deployment/docker-compose.yml up -d --build
-```
-
-This builds the existing OpenVINO source pipeline, mounts the render device, adds the host render group, and persists compiled-model cache, models, and config. The initial native build is substantially slower than CPU/CUDA's prebuilt-runtime path. Confirm `OpenVINO(GPU 0)` in `/stats` and actual Intel GPU activity before accepting the deployment.
 
 ## Reach the service
 
@@ -36,10 +36,10 @@ Compose binds to `127.0.0.1` by default. For a Blue Iris / Agent DVR machine els
 
 ```sh
 BLUE_ONYX_BIND_IP=192.168.1.20 \
-  docker compose -f deployment/docker-compose.cuda.yml up -d
+  docker compose -f deployment/docker-compose.yml up -d
 ```
 
-Restrict access to the intended clients. The inherited configuration/restart routes are unauthenticated, so an unrestricted published port also exposes administration. Remote authentication is roadmap work.
+Set `RENDER_GID` as in the Intel example when using that Compose file. Restrict access to the intended clients. The inherited configuration/restart routes are unauthenticated, so an unrestricted published port also exposes administration. Remote authentication is roadmap work.
 
 ```sh
 curl -f http://127.0.0.1:32168/health/live

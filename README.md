@@ -6,7 +6,7 @@
 
 # Blue Onyx Linux fork
 
-Development fork focused on Linux/Docker reliability and GPU inference. Start with [FORK_GUIDE.md](FORK_GUIDE.md) for source-built CPU, NVIDIA CUDA, and Intel OpenVINO deployments. See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the architecture, audit findings, roadmap, and validation limits. GPU/container execution is awaiting Linux hardware validation.
+Development fork focused on Intel OpenVINO GPU inference and Linux/Docker reliability. Start with [FORK_GUIDE.md](FORK_GUIDE.md) for source-built CPU, NVIDIA CUDA, and Intel OpenVINO deployments. See [REVERSE_ENGINEERING.md](REVERSE_ENGINEERING.md) for the architecture, audit findings, roadmap, and validation limits. GPU/container execution is awaiting Linux hardware validation.
 
 The sections below retain upstream platform documentation. Upstream release links refer to upstream builds; fork containers should be built using the guide above.
 
