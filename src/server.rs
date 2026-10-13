@@ -902,6 +902,8 @@ impl Metrics {
             ExecutionProvider::OpenVINO(index) => format!("OpenVINO(GPU {index})"),
             #[cfg(all(target_os = "linux", feature = "cuda"))]
             ExecutionProvider::CUDA(index) => format!("CUDA(GPU {index})"),
+            #[cfg(all(target_os = "linux", feature = "webgpu"))]
+            ExecutionProvider::WebGPU(index) => format!("WebGPU(GPU {index})"),
         };
     }
 }

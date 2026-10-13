@@ -11,6 +11,7 @@ homepage = "https://github.com/blue-onyx/blue-onyx"
 default = []
 openvino = ["ort/openvino"]
 cuda = ["ort/cuda"]
+webgpu = [] # Native plugin EP; uses the generic device API rather than a built-in provider.
 
 [dependencies]
 

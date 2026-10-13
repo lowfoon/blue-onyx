@@ -88,11 +88,18 @@ fn startup_worker_thread(
                         detector_config.object_detection_onnx_config.gpu_index as usize,
                     )
                 }
+                #[cfg(all(target_os = "linux", feature = "webgpu"))]
+                {
+                    ExecutionProvider::WebGPU(
+                        detector_config.object_detection_onnx_config.gpu_index as usize,
+                    )
+                }
                 #[cfg(not(any(
                     windows,
                     target_os = "macos",
                     all(target_os = "linux", feature = "openvino"),
-                    all(target_os = "linux", feature = "cuda")
+                    all(target_os = "linux", feature = "cuda"),
+                    all(target_os = "linux", feature = "webgpu")
                 )))]
                 {
                     ExecutionProvider::CPU

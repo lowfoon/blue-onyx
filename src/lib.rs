@@ -1,5 +1,9 @@
-#[cfg(all(feature = "openvino", feature = "cuda"))]
-compile_error!("Select either the openvino or cuda feature for each build");
+#[cfg(any(
+    all(feature = "openvino", feature = "cuda"),
+    all(feature = "openvino", feature = "webgpu"),
+    all(feature = "cuda", feature = "webgpu")
+))]
+compile_error!("Select only one of openvino, cuda or webgpu for each build");
 
 use clap::ValueEnum;
 use cli::Cli;
@@ -18,6 +22,8 @@ pub mod image;
 pub mod server;
 pub mod startup_coordinator;
 pub mod system_info;
+#[cfg(all(target_os = "linux", feature = "webgpu"))]
+mod webgpu;
 pub mod worker;
 
 pub static DOG_BIKE_CAR_BYTES: &[u8] = include_bytes!("../assets/dog_bike_car.jpg");
@@ -128,11 +134,15 @@ pub fn log_available_gpus() {
     #[cfg(all(target_os = "linux", feature = "cuda"))]
     info!("CUDA GPU inference is enabled on Linux");
 
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    info!("Experimental native WebGPU inference is enabled on Linux");
+
     #[cfg(not(any(
         windows,
         target_os = "macos",
         all(target_os = "linux", feature = "openvino"),
-        all(target_os = "linux", feature = "cuda")
+        all(target_os = "linux", feature = "cuda"),
+        all(target_os = "linux", feature = "webgpu")
     )))]
     info!("GPU acceleration not available on this platform - only CPU inference will be supported");
 

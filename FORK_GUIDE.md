@@ -28,6 +28,36 @@ The Intel OpenVINO deployment is the primary target; NVIDIA remains an optional 
 
 The CUDA build fails detector initialization when provider registration fails. Check `/stats` for `CUDA(GPU 0)`, the container logs for provider errors, and host GPU utilization during requests. A provider label alone does not prove all graph nodes execute on GPU.
 
+## Experimental WebGPU / Radeon
+
+The `webgpu` build uses the native ONNX Runtime plugin through Vulkan. Its dedicated image packages hash-verified ONNX Runtime **1.31.0** and WebGPU plugin **0.4.0**; the other images retain their existing runtimes. Linux x86_64 Radeon 660M inference has been prototyped with the medium RT-DETR v2 model. Other models and GPUs need their own validation.
+
+Provide an existing model directory containing `rt-detrv2-m.onnx` (and its class YAML when required):
+
+```sh
+RENDER_GID=$(stat -c '%g' /dev/dri/renderD128) \
+  BLUE_ONYX_MODELS_DIR=/srv/blueonyx/models \
+  docker compose -f deployment/docker-compose.webgpu.yml up -d --build
+```
+
+The example explicitly selects the RT-DETR v2 adapter and binds to loopback port **32170** for a separate trial deployment. Set `BLUE_ONYX_BIND_IP` and `BLUE_ONYX_HOST_PORT` if needed. It shares the render device, runs as an ordinary container user, persists configuration and shader cache, and mounts the supplied model directory read-only.
+
+Check readiness and confirm `WebGPU(GPU 0)` in `/stats`, and `WebGPU`/`canUseGPU: true` in detection responses. Core/plugin registration errors, missing plugin files and unavailable GPU indices fail initialization rather than silently selecting CPU. Ordinary unsupported-node CPU partitioning remains possible; measure actual graph execution and timing. `--force-cpu` bypasses plugin initialization for comparison. Graph capture is disabled because the tested graph has CPU shape operations.
+
+For a native Linux build:
+
+```sh
+python3 scripts/fetch_webgpu_runtime.py --output /tmp/blueonyx-webgpu-ort
+BLUE_ONYX_ORT_LIB_DIR=/tmp/blueonyx-webgpu-ort \
+  cargo build --locked --release --bin blue_onyx --features webgpu
+ORT_DYLIB_PATH=/tmp/blueonyx-webgpu-ort/libonnxruntime.so \
+  BLUE_ONYX_WEBGPU_PLUGIN_PATH=/tmp/blueonyx-webgpu-ort/libonnxruntime_providers_webgpu.so \
+  target/release/blue_onyx --model /srv/blueonyx/models/rt-detrv2-m.onnx \
+    --object-detection-model-type rt-detrv2 --port 32170
+```
+
+Select only one GPU feature per build. CPU-node fallback does not mean the whole graph is on CPU; readiness/provider labels alone do not establish GPU throughput or model accuracy.
+
 Do not run CPU and GPU examples simultaneously on the same port. The Compose files use named volumes for configuration and models. First startup downloads `rf-detr-n.onnx` and its YAML; internet access is required for that download. Later starts reuse the volume. Initial downloads can exceed the 180-second healthcheck start period on a slow connection; inspect logs and allow extra time. Docker marking a container unhealthy does not automatically restart it.
 
 ## Reach the service
@@ -89,7 +119,7 @@ cargo fmt --all --check
 cargo build --locked --bin blue_onyx
 ```
 
-For a CUDA Linux build, use the CUDA-enabled runtime directory and add `--features cuda`. For Intel, use matching OpenVINO libraries and `--features openvino`. Select only one GPU feature per build. Keep runtime and provider libraries together, and set `ORT_DYLIB_PATH` to the full runtime-library path when launching from another directory.
+For a CUDA Linux build, use the CUDA-enabled runtime directory and add `--features cuda`. For Intel, use matching OpenVINO libraries and `--features openvino`. For native WebGPU, use the pinned runtime/plugin setup above and `--features webgpu`. Select only one GPU feature per build. Keep runtime and provider libraries together, and set `ORT_DYLIB_PATH` to the full runtime-library path when launching from another directory.
 
 On Unix, run an actual CPU inference/lifecycle check:
 

@@ -1023,11 +1023,18 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
             (1, 1)
         }
 
+        #[cfg(all(target_os = "linux", feature = "webgpu"))]
+        {
+            device_type = DeviceType::GPU;
+            (1, 1)
+        }
+
         #[cfg(not(any(
             windows,
             target_os = "macos",
             all(target_os = "linux", feature = "openvino"),
-            all(target_os = "linux", feature = "cuda")
+            all(target_os = "linux", feature = "cuda"),
+            all(target_os = "linux", feature = "webgpu")
         )))]
         {
             let num_intra_threads = onnx_config.intra_threads.min(16);
@@ -1054,14 +1061,21 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
     // Build the session with the appropriate execution providers
     // Note: When providers list is empty (which is the case when force_cpu=true),
     // ONNX Runtime will default to CPU execution provider
-    let session = Session::builder()?
+    let session_builder = Session::builder()?
         .with_execution_providers(providers)
         .map_err(ort::Error::<()>::from)?
         .with_intra_threads(num_intra_threads)
         .map_err(ort::Error::<()>::from)?
         .with_inter_threads(num_inter_threads)
-        .map_err(ort::Error::<()>::from)?
-        .commit_from_memory(model_bytes.as_slice())?;
+        .map_err(ort::Error::<()>::from)?;
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    let session_builder = if onnx_config.force_cpu {
+        session_builder
+    } else {
+        crate::webgpu::configure_session(session_builder, onnx_config.gpu_index)?
+    };
+    let mut session_builder = session_builder;
+    let session = session_builder.commit_from_memory(model_bytes.as_slice())?;
 
     // Query the input size from the model
     let (width, height) = query_image_input_size(&session)?;
@@ -1080,6 +1094,8 @@ fn initialize_onnx(onnx_config: &OnnxConfig) -> InitializeOnnxResult {
         DeviceType::GPU => EndpointProvider::OpenVINO,
         #[cfg(all(target_os = "linux", feature = "cuda"))]
         DeviceType::GPU => EndpointProvider::CUDA,
+        #[cfg(all(target_os = "linux", feature = "webgpu"))]
+        DeviceType::GPU => EndpointProvider::WebGPU,
         _ => EndpointProvider::CPU,
     };
     Ok((
@@ -1103,6 +1119,8 @@ pub enum EndpointProvider {
     OpenVINO,
     #[cfg(all(target_os = "linux", feature = "cuda"))]
     CUDA,
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    WebGPU,
 }
 
 impl std::fmt::Display for EndpointProvider {
@@ -1117,6 +1135,8 @@ impl std::fmt::Display for EndpointProvider {
             EndpointProvider::OpenVINO => write!(f, "OpenVINO"),
             #[cfg(all(target_os = "linux", feature = "cuda"))]
             EndpointProvider::CUDA => write!(f, "CUDA"),
+            #[cfg(all(target_os = "linux", feature = "webgpu"))]
+            EndpointProvider::WebGPU => write!(f, "WebGPU"),
         }
     }
 }
@@ -1148,4 +1168,6 @@ pub enum ExecutionProvider {
     OpenVINO(usize), // GPU index
     #[cfg(all(target_os = "linux", feature = "cuda"))]
     CUDA(usize), // GPU index
+    #[cfg(all(target_os = "linux", feature = "webgpu"))]
+    WebGPU(usize),
 }

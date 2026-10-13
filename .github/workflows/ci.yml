@@ -80,6 +80,8 @@ jobs:
             dockerfile: Dockerfile.cuda
           - variant: openvino
             dockerfile: Dockerfile.openvino
+          - variant: webgpu
+            dockerfile: Dockerfile.webgpu
     steps:
       - uses: actions/checkout@v4
       - run: docker build -f "${{ matrix.dockerfile }}" -t blue-onyx:ci .
@@ -94,3 +96,16 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32168/health/ready)" = 503
           docker stop --time 10 blueonyx-ci
           test "$(docker inspect -f '{{.State.ExitCode}}' blueonyx-ci)" = 0
+      - name: Extract native WebGPU test bundle
+        if: matrix.variant == 'webgpu'
+        run: |
+          mkdir -p "$RUNNER_TEMP/blue-onyx-webgpu"
+          docker cp blueonyx-ci:/app/blue_onyx "$RUNNER_TEMP/blue-onyx-webgpu/"
+          docker cp blueonyx-ci:/app/ort-libs "$RUNNER_TEMP/blue-onyx-webgpu/"
+          docker cp blueonyx-ci:/app/LICENSE "$RUNNER_TEMP/blue-onyx-webgpu/"
+      - uses: actions/upload-artifact@v4
+        if: matrix.variant == 'webgpu'
+        with:
+          name: blue-onyx-webgpu-linux-x64
+          path: ${{ runner.temp }}/blue-onyx-webgpu/
+          retention-days: 7

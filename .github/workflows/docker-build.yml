@@ -20,6 +20,8 @@ jobs:
             dockerfile: Dockerfile.cuda
           - variant: openvino
             dockerfile: Dockerfile.openvino
+          - variant: webgpu
+            dockerfile: Dockerfile.webgpu
     steps:
       - uses: actions/checkout@v4
         with:
