@@ -32,7 +32,7 @@ The CUDA build fails detector initialization when provider registration fails. C
 
 The `webgpu` build uses the native ONNX Runtime plugin through Vulkan. Its dedicated image packages hash-verified ONNX Runtime **1.31.0** and WebGPU plugin **0.4.0**; the other images retain their existing runtimes. Linux x86_64 Radeon 660M inference has been prototyped with the medium RT-DETR v2 model. Other models and GPUs need their own validation.
 
-Provide an existing model directory containing `rt-detrv2-m.onnx` (and its class YAML when required):
+Provide an existing model directory containing `rt-detrv2-m.onnx` and its matching class YAML. For the standard COCO model, copy `assets/coco_classes.yaml` into that directory as `rt-detrv2-m.yaml`:
 
 ```sh
 RENDER_GID=$(stat -c '%g' /dev/dri/renderD128) \
@@ -57,6 +57,10 @@ ORT_DYLIB_PATH=/tmp/blueonyx-webgpu-ort/libonnxruntime.so \
 ```
 
 Select only one GPU feature per build. CPU-node fallback does not mean the whole graph is on CPU; readiness/provider labels alone do not establish GPU throughput or model accuracy.
+
+The native Rust API was tested on Radeon 660M with the unchanged medium RT-DETR v2 model, ONNX Runtime 1.31.0, plugin 0.4.0 and Mesa RADV 25.2.8. In an isolated container with a one-CPU quota, three requests per public image measured approximately 295 ms GPU inference versus 875–921 ms CPU inference. Complete local HTTP times were 303–306 ms for `dog_bike_car.jpg` and 427–449 ms for the larger `crossing.jpg`. All returned detections above 0.5 matched CPU labels and integer box coordinates; confidence differences were below 0.000002. This is a small functional comparison, not a camera accuracy or production performance claim.
+
+Native API checks also passed missing-plugin/unavailable-GPU errors, forced CPU operation, in-process GPU restart and clean SIGTERM. A bounded 12-request burst with a four-slot queue and a one-second deadline returned three successes, seven overload rejections and two deadline responses; the longest request took approximately 1.01 seconds, liveness remained responsive, and subsequent detection recovered. The dedicated image passed Linux tests, Clippy and container lifecycle checks in [CI at `ba74833`](https://github.com/lowfoon/blue-onyx/actions/runs/38428479200). Hardware validation used the native package extracted from that image; Docker device mapping on Radeon and Blue Iris/Agent DVR integration still need separate deployment checks.
 
 Do not run CPU and GPU examples simultaneously on the same port. The Compose files use named volumes for configuration and models. First startup downloads `rf-detr-n.onnx` and its YAML; internet access is required for that download. Later starts reuse the volume. Initial downloads can exceed the 180-second healthcheck start period on a slow connection; inspect logs and allow extra time. Docker marking a container unhealthy does not automatically restart it.
 
